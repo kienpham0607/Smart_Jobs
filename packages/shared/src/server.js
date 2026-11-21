@@ -8,7 +8,12 @@ import { ApiError, errorHandler } from './errors.js';
 export function createBaseApp(name, database = false) {
   const app = express();
   app.disable('x-powered-by');
-  app.use(helmet());
+  app.use(
+    helmet({
+      // API được gọi từ frontend Cloudflare khác origin; mặc định same-origin sẽ chặn trình duyệt.
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
   app.use(cors({ origin: config().origin, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] }));
   app.use(express.json({ limit: '100kb' }));
   app.get('/health', (req, res) => {
