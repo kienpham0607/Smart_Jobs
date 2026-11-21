@@ -26,7 +26,12 @@ def candidate_id(request: Request) -> str:
     if payload.get("role") != "CANDIDATE":
         raise HTTPException(status_code=403, detail="Tính năng này dành cho ứng viên.")
     user_id = payload.get("sub", "")
-    if not re.fullmatch(r"[a-fA-F0-9]{24}", user_id):
+    # Đồng bộ với packages/shared: ID là UUID Postgres, không còn ObjectId Mongo.
+    if not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        user_id,
+        flags=re.IGNORECASE,
+    ):
         raise HTTPException(status_code=401, detail="Phiên đăng nhập không hợp lệ.")
     return user_id
 

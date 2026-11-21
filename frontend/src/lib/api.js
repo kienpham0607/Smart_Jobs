@@ -11,7 +11,11 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401 && error.config?.headers?.Authorization)
+    if (
+      error.response?.status === 401 &&
+      error.config?.headers?.Authorization &&
+      error.response?.data?.error?.code === 'UNAUTHORIZED'
+    )
       window.dispatchEvent(new Event('smartjob:unauthorized'));
     return Promise.reject(error);
   },

@@ -40,7 +40,13 @@ def _post(path: str, payload: dict, timeout: float = 45.0) -> dict:
             f"Không kết nối được API AI tại {settings.openai_api_base_url}.",
         ) from error
     if response.is_error:
-        status_code = response.status_code if response.status_code in (401, 429, 503) else 502
+        # Không forward 401 của nhà cung cấp AI — tránh frontend hiểu nhầm là JWT hết hạn.
+        if response.status_code == 429:
+            status_code = 429
+        elif response.status_code == 503:
+            status_code = 503
+        else:
+            status_code = 502
         detail = response.text[:300]
         try:
             err_json = response.json()
