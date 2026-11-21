@@ -30,12 +30,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify secrets
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          missing=""
+          [ -z "$GHCR_TOKEN" ] && missing="$missing GHCR_TOKEN"
+          [ -z "$RENDER_DEPLOY_HOOK" ] && missing="$missing RENDER_DEPLOY_HOOK"
+          if [ -n "$missing" ]; then
+            echo "Thiếu secret:$missing"
+            exit 1
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN thường bị write_package denied với package đã tạo sẵn ngoài Actions.
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -56,9 +70,5 @@ jobs:
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
-          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
-            echo "Thiếu secret RENDER_DEPLOY_HOOK. Thêm Deploy Hook từ Render vào repo Secrets."
-            exit 1
-          fi
           curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
           echo "Đã gọi Render Deploy Hook."
