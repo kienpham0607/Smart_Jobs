@@ -1,0 +1,98 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { ApiError } from '@smartjob/shared/errors';
+import { deleteResumeByUser, findResumeByUser, upsertResume } from '../models/Resume.js';
+
+const MAX_SIZE = 5 * 1024 * 1024;
+// Acrobat accepts %PDF- anywhere in the first 1024 bytes (leading junk / BOM).
+const isPdfBuffer = (body) => {
+  const end = Math.min(body.length, 1024);
+  for (let i = 0; i <= end - 5; i += 1) {
+    if (
+      body[i] === 0x25 &&
+      body[i + 1] === 0x50 &&
+      body[i + 2] === 0x44 &&
+      body[i + 3] === 0x46 &&
+      body[i + 4] === 0x2d
+    )
+      return true;
+  }
+  return false;
+};
+const safeName = (value) => {
+  let decoded = String(value || 'cv.pdf');
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    /* Keep the raw header value when it is not percent-encoded. */
+  }
+  const name = basename(decoded)
+    .replace(/[\r\n"\\/]/g, '_')
+    .trim()
+    .slice(0, 150);
+  return name.toLowerCase().endsWith('.pdf') ? name : `${name || 'cv'}.pdf`;
+};
+const publicResume = (resume) => ({
+  originalName: resume.originalName,
+  size: resume.size,
+  mimeType: resume.mimeType,
+  uploadedAt: resume.updatedAt,
+});
+
+export async function getResume(userId) {
+  const resume = await findResumeByUser(userId);
+  return resume ? publicResume(resume) : null;
+}
+
+export async function uploadResume(userId, body, originalName, storageDir) {
+  if (!Buffer.isBuffer(body) || body.length === 0)
+    throw new ApiError(400, 'Vui lòng chọn file PDF.', 'RESUME_REQUIRED');
+  if (body.length > MAX_SIZE)
+    throw new ApiError(413, 'CV không được vượt quá 5 MB.', 'PAYLOAD_TOO_LARGE');
+  if (!isPdfBuffer(body))
+    throw new ApiError(
+      400,
+      'File tải lên không phải PDF hợp lệ. Hãy xuất/Save as PDF — không chỉ đổi đuôi .pdf.',
+      'INVALID_PDF',
+    );
+
+  const previous = await findResumeByUser(userId);
+  await mkdir(storageDir, { recursive: true });
+  const storedName = `${randomUUID()}.pdf`;
+  const filePath = join(storageDir, storedName);
+  await writeFile(filePath, body, { flag: 'wx', mode: 0o600 });
+  try {
+    const resume = await upsertResume({
+      userId,
+      storedName,
+      originalName: safeName(originalName),
+      size: body.length,
+    });
+    if (previous) await unlink(join(storageDir, previous.storedName)).catch(() => {});
+    return publicResume(resume);
+  } catch (error) {
+    await unlink(filePath).catch(() => {});
+    throw error;
+  }
+}
+
+export async function readResume(userId, storageDir) {
+  const resume = await findResumeByUser(userId);
+  if (!resume) throw new ApiError(404, 'Bạn chưa tải CV lên.', 'RESUME_NOT_FOUND');
+  try {
+    return { data: await readFile(join(storageDir, resume.storedName)), name: resume.originalName };
+  } catch (error) {
+    if (error.code === 'ENOENT')
+      throw new ApiError(404, 'Không tìm thấy file CV.', 'RESUME_FILE_NOT_FOUND');
+    throw error;
+  }
+}
+
+export async function deleteResume(userId, storageDir) {
+  const resume = await deleteResumeByUser(userId);
+  if (!resume) throw new ApiError(404, 'Bạn chưa tải CV lên.', 'RESUME_NOT_FOUND');
+  await unlink(join(storageDir, resume.storedName)).catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+}
