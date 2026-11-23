@@ -14,7 +14,7 @@ create table if not exists smartjob_users.users (
   password_hash text not null,
   role text not null check (role in ('CANDIDATE', 'RECRUITER')),
   skills text[] not null default '{}',
-  experience_years integer not null default 0 check (experience_years >= 0),
+  experience_years real not null default 0 check (experience_years >= 0),
   desired_position text not null default '',
   location text not null default '',
   company_name text not null default '',

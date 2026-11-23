@@ -107,6 +107,8 @@ class ExtractedProfile(BaseModel):
     certifications: list[str] = Field(default_factory=list)
     languages: list[LanguageItem] = Field(default_factory=list)
     links: ProfileLinks = Field(default_factory=ProfileLinks)
+    # "ai" khi LLM trả kết quả, "heuristic" khi API AI lỗi và phải dùng regex dự phòng.
+    source: Literal["ai", "heuristic"] = "ai"
 
 
 class ExtractProfileEnvelope(BaseModel):

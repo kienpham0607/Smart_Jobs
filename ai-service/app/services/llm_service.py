@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import math
 import re
 from datetime import date
 from io import BytesIO
@@ -10,6 +12,8 @@ from app.prompts.job_advisor import advice_bundle_instructions
 from app.prompts.profile_extract import extract_profile_instructions
 from app.schemas.chat import AdvisorBundle, ExtractedProfile
 from app.services.openai_client import AiProviderError, generate_json
+
+logger = logging.getLogger("uvicorn.error")
 
 COMPACT_SCHEMA = {
     "profile": "object",
@@ -109,7 +113,10 @@ def heuristic_profile(cv_text: str) -> dict:
     compact_text = lowered.replace(".", "").replace(" ", "")
     for skill in skill_vocab:
         compact_skill = skill.replace(".", "").replace(" ", "")
-        if skill in lowered or compact_skill in compact_text:
+        # Biên từ để "java" không khớp nhầm với "javascript".
+        exact = re.search(rf"(?<![a-z0-9]){re.escape(skill)}(?![a-z0-9])", lowered)
+        compact = compact_skill != skill and compact_skill in compact_text
+        if exact or compact:
             mapped = skill_map.get(skill, skill)
             if mapped not in skills:
                 skills.append(mapped)
@@ -445,7 +452,8 @@ def _normalize_experience_years(merged: dict) -> dict:
     if years is not None:
         years = max(0.0, min(float(years), 60.0))
         # Half-year steps for the profile form.
-        years = round(years * 2) / 2
+        # Làm tròn nửa lên (round() của Python làm tròn 0.5 về 0).
+        years = math.floor(years * 2 + 0.5) / 2
         if years == int(years):
             years = float(int(years))
 
@@ -492,34 +500,200 @@ def _display_location(raw: str | None) -> str | None:
     return _DISPLAY_LOCATIONS.get(raw.strip().casefold(), raw.strip().title())
 
 
+_SECTION_HEADINGS = {
+    "education": (
+        "education",
+        "học vấn",
+        "hoc van",
+        "trình độ học vấn",
+    ),
+    "work": (
+        "work experience",
+        "experience",
+        "professional experience",
+        "employment history",
+        "kinh nghiệm làm việc",
+        "kinh nghiệm",
+        "kinh nghiem lam viec",
+    ),
+    "summary": (
+        "summary",
+        "profile",
+        "about me",
+        "objective",
+        "career objective",
+        "giới thiệu",
+        "giới thiệu bản thân",
+        "mục tiêu nghề nghiệp",
+    ),
+    "other": (
+        "projects",
+        "dự án",
+        "skills",
+        "kỹ năng",
+        "certifications",
+        "chứng chỉ",
+        "languages",
+        "ngoại ngữ",
+        "activities",
+        "hoạt động",
+        "awards",
+        "giải thưởng",
+        "references",
+        "interests",
+        "sở thích",
+    ),
+}
+
+_DATE_TOKEN = (
+    r"(?:[A-Za-zÀ-ỹ]{3,9}\.?\s+\d{4}|\d{1,2}[/-]\d{4}|\d{4}[/-]\d{1,2}|\d{4}"
+    r"|present|current|now|nay|hiện\s*tại)"
+)
+_DATE_RANGE_AT_END = re.compile(
+    rf"\s*({_DATE_TOKEN})\s*(?:-|–|—|to|đến)\s*({_DATE_TOKEN})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _split_sections(lines: list[str]) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current = "header"
+    for line in lines:
+        key = line.casefold().strip(" :")
+        matched = next(
+            (name for name, heads in _SECTION_HEADINGS.items() if key in heads),
+            None,
+        )
+        if matched:
+            current = matched if matched != "other" else f"other:{key}"
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(line)
+    return sections
+
+
+def _split_entries(lines: list[str]) -> list[dict]:
+    """Group a section into entries that start with a line ending in a date range."""
+    entries: list[dict] = []
+    for line in lines:
+        match = _DATE_RANGE_AT_END.search(line)
+        if match:
+            entries.append(
+                {
+                    "head": line[: match.start()].strip(" |,-–—"),
+                    "period": f"{match.group(1)} - {match.group(2)}",
+                    "body": [],
+                }
+            )
+        elif entries:
+            entries[-1]["body"].append(line)
+    return entries
+
+
+def _parse_work_entries(lines: list[str]) -> list[dict]:
+    items = []
+    for entry in _split_entries(lines):
+        body = entry["body"]
+        title = ""
+        if body and not body[0].startswith(("•", "-", "*")):
+            title = re.split(r"\s+[—–|]\s+", body[0], maxsplit=1)[0].strip()
+            body = body[1:]
+        description = " ".join(line.lstrip("•-* ").strip() for line in body)
+        items.append(
+            {
+                "title": title[:120],
+                "company": entry["head"][:120],
+                "period": entry["period"],
+                "description": description[:400],
+            }
+        )
+    return items
+
+
+def _parse_education_entries(lines: list[str]) -> list[dict]:
+    items = []
+    for entry in _split_entries(lines):
+        degree, field = "", ""
+        if entry["body"]:
+            first = entry["body"][0].split("|", 1)[0].strip()
+            parts = re.split(r"\s+(?:in|of|ngành|chuyên ngành)\s+", first, maxsplit=1, flags=re.I)
+            degree = parts[0].strip()
+            field = parts[1].strip() if len(parts) > 1 else ""
+        items.append(
+            {
+                "school": entry["head"][:120],
+                "degree": degree[:120],
+                "field": field[:120],
+                "period": entry["period"],
+            }
+        )
+    return items
+
+
+def _find_link(cv_text: str, domain_pattern: str) -> str | None:
+    match = re.search(
+        rf"(?:https?://)?(?:www\.)?{domain_pattern}/[A-Za-z0-9_.\-/]+",
+        cv_text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    url = match.group(0).rstrip("/.")
+    return url if url.lower().startswith("http") else f"https://{url}"
+
+
+def _looks_like_headline(line: str) -> bool:
+    if len(line) > 90 or "@" in line or re.search(r"\d{3}", line):
+        return False
+    return bool(re.search(r"[A-Za-zÀ-ỹ]{3}", line))
+
+
 def _heuristic_extract_profile(cv_text: str, heuristic: dict) -> dict:
     lines = [line.strip() for line in cv_text.splitlines() if line.strip()]
-    name = lines[0][:80] if lines else None
-    phone_match = re.search(r"(?:\+?84|0)(?:[\s.\-]?\d){8,10}", cv_text)
-    phone = re.sub(r"\s+", "", phone_match.group(0)) if phone_match else None
-    gh_match = re.search(r"https?://(?:www\.)?github\.com/[A-Za-z0-9_.\-]+", cv_text, re.I)
-    li_match = re.search(r"https?://(?:www\.)?linkedin\.com/in/[A-Za-z0-9_.\-]+", cv_text, re.I)
+    sections = _split_sections(lines)
+    header = sections.get("header") or lines[:3]
+
+    name = header[0][:80] if header else None
+    headline = header[1] if len(header) > 1 and _looks_like_headline(header[1]) else None
+
+    phone_match = re.search(r"(?:\+?84|0)(?:[\s.\-()]?\d){8,10}", cv_text)
+    phone = re.sub(r"[\s().\-]", "", phone_match.group(0)) if phone_match else None
+
+    work_experience = _parse_work_entries(sections.get("work", []))
+    education = _parse_education_entries(sections.get("education", []))
+
+    summary_lines = sections.get("summary") or []
+    if summary_lines:
+        bio = " ".join(summary_lines)[:500]
+    elif headline:
+        bio = headline
+    else:
+        bio = None
 
     roles = heuristic.get("target_roles") or heuristic.get("experience_roles") or []
+    desired_position = headline or (roles[0].title() if roles else None)
+
     extracted = {
         "name": name,
         "phone": phone,
         "location": _display_location(heuristic.get("location")),
         "experience_years": heuristic.get("experience_years"),
-        "desired_position": roles[0].title() if roles else None,
+        "desired_position": desired_position,
         "skills": heuristic.get("skills") or [],
-        "bio": heuristic.get("summary") or None,
-        "education": [],
-        "work_experience": [],
+        "bio": bio,
+        "education": education,
+        "work_experience": work_experience,
         "certifications": [],
         "languages": [],
         "links": {
-            "linkedin": li_match.group(0) if li_match else None,
-            "github": gh_match.group(0) if gh_match else None,
+            "linkedin": _find_link(cv_text, r"linkedin\.com/in"),
+            "github": _find_link(cv_text, r"github\.com"),
             "portfolio": None,
         },
     }
-    return _merge_extract(heuristic, extracted)
+    merged = _merge_extract(heuristic, extracted)
+    merged["source"] = "heuristic"
+    return merged
 
 
 def _heuristic_advice_bundle(
@@ -614,8 +788,11 @@ async def extract_profile_from_cv(cv_text: str) -> dict:
             EXTRACT_SCHEMA,
         )
         extracted = ExtractedProfile.model_validate_json(response_text).model_dump()
-        return _merge_extract(heuristic, extracted)
-    except (AiProviderError, ValueError, KeyError):
+        merged = _merge_extract(heuristic, extracted)
+        merged["source"] = "ai"
+        return merged
+    except (AiProviderError, ValueError, KeyError) as error:
+        logger.warning("extract-profile: AI call failed, using heuristic fallback: %s", error)
         return _heuristic_extract_profile(cv_text, heuristic)
 
 

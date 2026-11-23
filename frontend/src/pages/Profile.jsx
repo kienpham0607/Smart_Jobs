@@ -151,7 +151,14 @@ export default function Profile() {
       const response = await api.post('/ai/extract-profile', null, { timeout: 120000 });
       const extracted = response.data.data;
       setForm((prev) => mergeExtracted(prev, extracted));
-      toast('Đã điền hồ sơ từ CV. Kiểm tra rồi bấm Lưu thay đổi.');
+      if (extracted.source === 'heuristic') {
+        toast(
+          'Dịch vụ AI đang không phản hồi nên hồ sơ được điền bằng bộ đọc cơ bản. Hãy kiểm tra kỹ các trường trước khi lưu.',
+          'error',
+        );
+      } else {
+        toast('Đã điền hồ sơ từ CV. Kiểm tra rồi bấm Lưu thay đổi.');
+      }
       return true;
     } catch (error) {
       toast(errorMessage(error), 'error');

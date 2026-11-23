@@ -52,7 +52,7 @@ function statements(schema, table) {
       password_hash text not null,
       role text not null check (role in ('CANDIDATE', 'RECRUITER')),
       skills text[] not null default '{}',
-      experience_years integer not null default 0 check (experience_years >= 0),
+      experience_years real not null default 0 check (experience_years >= 0),
       desired_position text not null default '',
       location text not null default '',
       company_name text not null default '',
@@ -68,6 +68,8 @@ function statements(schema, table) {
       constraint users_email_key unique (email)
     )`,
     `alter table ${schema}.users enable row level security`,
+    // DB cũ tạo cột integer; form và AI dùng bước 0.5 năm.
+    `alter table ${schema}.users alter column experience_years type real`,
   ];
   const jobs = [
     `create table if not exists ${schema}.jobs (
